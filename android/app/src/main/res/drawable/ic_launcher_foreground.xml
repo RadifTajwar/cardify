@@ -1,0 +1,15 @@
+<!-- Two stacked visiting cards; the avatar and text lines are cut out so the icon also works monochrome. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillAlpha="0.5"
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M33,41.5v-1a4,4 0 0 1 4,-4h40a4,4 0 0 1 4,4v20a4,4 0 0 1 -4,4v-23h-44z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M31,43.5h40a4,4 0 0 1 4,4v20a4,4 0 0 1 -4,4h-40a4,4 0 0 1 -4,-4v-20a4,4 0 0 1 4,-4zM32.5,57.5a5.5,5.5 0 1 0 11,0a5.5,5.5 0 1 0 -11,0zM49.5,52.5h19a1.5,1.5 0 0 1 0,3h-19a1.5,1.5 0 0 1 0,-3zM49.5,59.5h12a1.5,1.5 0 0 1 0,3h-12a1.5,1.5 0 0 1 0,-3z" />
+</vector>

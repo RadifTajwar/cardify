@@ -1,0 +1,20 @@
+# Android build output and machine-specific files
+android/.gradle/
+android/.kotlin/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties
+*.iml
+
+# Server data: your cards and their photos
+server/data/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# Local tool folders, not part of the app
+graft/
+.ignore
+.claude/settings.local.json
+.DS_Store
