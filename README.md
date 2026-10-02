@@ -4,34 +4,35 @@ Keep the visiting cards from your wallet on your phone. Scan a card and Cardify 
 email, website, address); check the details and save. Search them all, and call, email, open the map, share, or save to
 contacts from any card.
 
-- `server/` — Go API, standard library only. Cards live in `data/cards.json`, photos in `data/images/`. Back up by copying `data/`.
+- `server/` — Go API, deployed on Vercel. Cards and their photos live in a Postgres database (Neon).
 - `android/` — Kotlin + Jetpack Compose (Material 3) app, Android 8.0+. Scanning uses Google's ML Kit document scanner
   and text recognition, so the phone needs Google Play services.
 
-## Run the server
+## Deploy the server
+
+The server runs on Vercel with a Neon Postgres database connected to the project (that sets `DATABASE_URL`).
 
 ```sh
-openssl rand -hex 24                       # make a token once; the app must send the same one
-cd server && CARDIFY_TOKEN=<token> go run .
+cd server
+openssl rand -hex 24 | vercel env add CARDIFY_TOKEN production   # once; the app must send the same token
+vercel deploy --prod
 ```
 
-Optional env: `CARDIFY_ADDR` (default `:8080`), `CARDIFY_DATA` (default `./data`).
+Run it locally against the same database: `vercel env pull .env.local && set -a && . ./.env.local && set +a && go run .`
 
 ## Run the app
 
 1. Set the server address and token in `android/gradle.properties` (or in `~/.gradle/gradle.properties`, which keeps the
    token out of git):
-   - emulator: `cardify.apiUrl=http://10.0.2.2:8080`
-   - phone on the same Wi-Fi: `cardify.apiUrl=http://<your computer's LAN IP>:8080`
+   - `cardify.apiUrl=https://<your-project>.vercel.app`
    - `cardify.token=<token>`
 2. Open `android/` in Android Studio and press Run (or `cd android && ./gradlew installDebug`).
 
-Debug builds may talk plain `http://`. Release builds only allow `https://`, so put the server behind a TLS proxy
-(e.g. Caddy) before reaching it over the internet.
+Debug builds may also talk plain `http://` (handy for a server on your own Wi-Fi); release builds only allow `https://`.
 
 ## Test
 
 ```sh
-cd server && go test ./...
+cd server && CARDIFY_TEST_DATABASE_URL=<direct Postgres URL> go test ./...   # uses a throwaway schema
 cd android && ./gradlew testDebugUnitTest
 ```

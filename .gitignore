@@ -18,3 +18,7 @@ graft/
 .ignore
 .claude/settings.local.json
 .DS_Store
+
+# Vercel project link and pulled secrets
+.vercel/
+.env*

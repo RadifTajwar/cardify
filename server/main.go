@@ -1,24 +1,25 @@
-// Command server is the Cardify API: visiting cards in a JSON file, their photos as JPEGs beside it.
+// Command server is the Cardify API: visiting cards and their photos, stored in Postgres.
 package main
 
 import (
 	"cmp"
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Card's fields are in cardColumns order, so query rows scan straight into it.
 type Card struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -34,90 +35,42 @@ type Card struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// ponytail: every card lives in memory and cards.json is rewritten on each change.
-// Plenty for a wallet's worth of cards; move to SQLite if this ever holds tens of thousands.
-type store struct {
-	mu    sync.Mutex
-	dir   string
-	cards map[string]Card
-}
+const cardColumns = "id, name, title, company, phone, email, website, address, notes, image IS NOT NULL, created_at, updated_at"
 
-func openStore(dir string) (*store, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "images"), 0o700); err != nil {
-		return nil, err
-	}
-	s := &store{dir: dir, cards: map[string]Card{}}
-	b, err := os.ReadFile(filepath.Join(dir, "cards.json"))
-	if errors.Is(err, fs.ErrNotExist) {
-		return s, nil
-	}
+// ponytail: photos live in the table; move them to object storage if they outgrow the database.
+const schema = `CREATE TABLE IF NOT EXISTS cards (
+	id         text PRIMARY KEY,
+	name       text NOT NULL,
+	title      text NOT NULL,
+	company    text NOT NULL,
+	phone      text NOT NULL,
+	email      text NOT NULL,
+	website    text NOT NULL,
+	address    text NOT NULL,
+	notes      text NOT NULL,
+	image      bytea,
+	created_at timestamptz NOT NULL DEFAULT now(),
+	updated_at timestamptz NOT NULL DEFAULT now()
+)`
+
+type store struct{ db *pgxpool.Pool }
+
+func openStore(ctx context.Context, url string) (*store, error) {
+	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, err
 	}
-	var list []Card
-	if err := json.Unmarshal(b, &list); err != nil {
+	// Neon's connection pooler can't keep prepared statements, so send each query in one round trip instead.
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
+	db, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
 		return nil, err
 	}
-	for _, c := range list {
-		s.cards[c.ID] = c
+	if _, err := db.Exec(ctx, schema); err != nil {
+		db.Close()
+		return nil, err
 	}
-	return s, nil
-}
-
-func (s *store) imagePath(id string) string { return filepath.Join(s.dir, "images", id+".jpg") }
-
-// sorted returns the cards by name (company when there's no name). Caller holds mu.
-func (s *store) sorted() []Card {
-	list := make([]Card, 0, len(s.cards))
-	for _, c := range s.cards {
-		list = append(list, c)
-	}
-	key := func(c Card) string { return strings.ToLower(cmp.Or(c.Name, c.Company)) }
-	slices.SortFunc(list, func(a, b Card) int { return cmp.Or(cmp.Compare(key(a), key(b)), cmp.Compare(a.ID, b.ID)) })
-	return list
-}
-
-// set stores c under id (deletes id when c is nil) and persists, undoing the change if the write fails.
-// Caller holds mu.
-func (s *store) set(id string, c *Card) error {
-	old, had := s.cards[id]
-	if c != nil {
-		s.cards[id] = *c
-	} else {
-		delete(s.cards, id)
-	}
-	b, err := json.MarshalIndent(s.sorted(), "", "  ")
-	if err == nil {
-		err = writeFileAtomic(filepath.Join(s.dir, "cards.json"), b)
-	}
-	if err != nil {
-		if had {
-			s.cards[id] = old
-		} else {
-			delete(s.cards, id)
-		}
-	}
-	return err
-}
-
-// writeFileAtomic fsyncs a temp file and renames it over path, so a crash never leaves half a file.
-func writeFileAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return &store{db}, nil
 }
 
 func (s *store) handler(token string) http.Handler {
@@ -141,9 +94,12 @@ func (s *store) handler(token string) http.Handler {
 }
 
 func (s *store) list(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	list := s.sorted()
-	s.mu.Unlock()
+	rows, _ := s.db.Query(r.Context(), "SELECT "+cardColumns+" FROM cards ORDER BY lower(coalesce(nullif(name, ''), company)), id")
+	list, err := pgx.CollectRows(rows, pgx.RowToStructByPos[Card])
+	if err != nil {
+		serverError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
@@ -152,16 +108,10 @@ func (s *store) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	c.ID = rand.Text()
-	c.CreatedAt = time.Now().UTC()
-	c.UpdatedAt = c.CreatedAt
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.set(c.ID, &c); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, c)
+	s.one(w, r, http.StatusCreated,
+		`INSERT INTO cards (id, name, title, company, phone, email, website, address, notes)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING `+cardColumns,
+		rand.Text(), c.Name, c.Title, c.Company, c.Phone, c.Email, c.Website, c.Address, c.Notes)
 }
 
 func (s *store) update(w http.ResponseWriter, r *http.Request) {
@@ -169,52 +119,44 @@ func (s *store) update(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	old, found := s.cards[r.PathValue("id")]
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	c.ID, c.HasImage, c.CreatedAt, c.UpdatedAt = old.ID, old.HasImage, old.CreatedAt, time.Now().UTC()
-	if err := s.set(c.ID, &c); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, c)
+	s.one(w, r, http.StatusOK,
+		`UPDATE cards SET name = $2, title = $3, company = $4, phone = $5, email = $6, website = $7,
+		address = $8, notes = $9, updated_at = now() WHERE id = $1 RETURNING `+cardColumns,
+		r.PathValue("id"), c.Name, c.Title, c.Company, c.Phone, c.Email, c.Website, c.Address, c.Notes)
 }
 
 func (s *store) delete(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	id := r.PathValue("id")
-	if _, found := s.cards[id]; !found {
-		http.NotFound(w, r)
-		return
-	}
-	if err := s.set(id, nil); err != nil {
+	tag, err := s.db.Exec(r.Context(), "DELETE FROM cards WHERE id = $1", r.PathValue("id"))
+	switch {
+	case err != nil:
 		serverError(w, err)
-		return
+	case tag.RowsAffected() == 0:
+		http.NotFound(w, r)
+	default:
+		w.WriteHeader(http.StatusNoContent)
 	}
-	if err := os.Remove(s.imagePath(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		log.Printf("remove image of %s: %v", id, err)
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *store) getImage(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	c, found := s.cards[r.PathValue("id")]
-	s.mu.Unlock()
-	if !found || !c.HasImage {
+	var img []byte
+	err := s.db.QueryRow(r.Context(), "SELECT image FROM cards WHERE id = $1 AND image IS NOT NULL", r.PathValue("id")).Scan(&img)
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, s.imagePath(c.ID))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	// The app puts the card's updatedAt in photo URLs, so a URL's bytes never change.
+	// "private" keeps Vercel's CDN from caching someone's card for others.
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	w.Write(img)
 }
 
 func (s *store) putImage(w http.ResponseWriter, r *http.Request) {
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10<<20))
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 4<<20)) // Vercel caps request bodies at 4.5 MB
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -223,26 +165,26 @@ func (s *store) putImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "photo must be a JPEG", http.StatusUnsupportedMediaType)
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c, found := s.cards[r.PathValue("id")]
-	if !found {
-		http.NotFound(w, r)
-		return
-	}
-	if err := writeFileAtomic(s.imagePath(c.ID), b); err != nil {
-		serverError(w, err)
-		return
-	}
-	c.HasImage, c.UpdatedAt = true, time.Now().UTC()
-	if err := s.set(c.ID, &c); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, c)
+	s.one(w, r, http.StatusOK,
+		"UPDATE cards SET image = $2, updated_at = now() WHERE id = $1 RETURNING "+cardColumns,
+		r.PathValue("id"), b)
 }
 
-// decodeCard reads the editable fields from the body; id, image flag and timestamps stay server-owned.
+// one runs a query returning a single card and writes it, or 404 when no card matched.
+func (s *store) one(w http.ResponseWriter, r *http.Request, status int, sql string, args ...any) {
+	rows, _ := s.db.Query(r.Context(), sql, args...)
+	c, err := pgx.CollectExactlyOneRow(rows, pgx.RowToStructByPos[Card])
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		http.NotFound(w, r)
+	case err != nil:
+		serverError(w, err)
+	default:
+		writeJSON(w, status, c)
+	}
+}
+
+// decodeCard reads the editable fields from the body; id, photo and timestamps stay server-owned.
 func decodeCard(w http.ResponseWriter, r *http.Request) (Card, bool) {
 	var in Card
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
@@ -273,19 +215,19 @@ func serverError(w http.ResponseWriter, err error) {
 }
 
 func main() {
-	token := os.Getenv("CARDIFY_TOKEN")
-	if token == "" {
-		log.Fatal("set CARDIFY_TOKEN to the secret the app sends (cardify.token in android/gradle.properties)")
+	token, dbURL := os.Getenv("CARDIFY_TOKEN"), os.Getenv("DATABASE_URL")
+	if token == "" || dbURL == "" {
+		log.Fatal("set CARDIFY_TOKEN (the secret the app sends) and DATABASE_URL (Postgres; Vercel's Neon integration sets it)")
 	}
-	s, err := openStore(cmp.Or(os.Getenv("CARDIFY_DATA"), "data"))
+	s, err := openStore(context.Background(), dbURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	srv := &http.Server{
-		Addr:              cmp.Or(os.Getenv("CARDIFY_ADDR"), ":8080"),
+		Addr:              ":" + cmp.Or(os.Getenv("PORT"), "8080"), // Vercel sets PORT
 		Handler:           s.handler(token),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("cardify listening on %s, data in %s", srv.Addr, s.dir)
+	log.Printf("cardify listening on %s", srv.Addr)
 	log.Fatal(srv.ListenAndServe())
 }

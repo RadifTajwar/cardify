@@ -1,25 +1,55 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestCardLifecycle(t *testing.T) {
-	dir := t.TempDir()
-	s, err := openStore(dir)
+	base := os.Getenv("CARDIFY_TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("set CARDIFY_TEST_DATABASE_URL to a direct (unpooled) Postgres URL to run this test")
+	}
+	ctx := context.Background()
+
+	// A throwaway schema, so the test never touches real cards.
+	schema := "test_" + strings.ToLower(rand.Text())
+	admin, err := pgx.Connect(ctx, base)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer admin.Close(ctx)
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
+
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	s, err := openStore(ctx, u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.db.Close()
 	srv := httptest.NewServer(s.handler("secret"))
 	defer srv.Close()
 
-	call := func(method, path, token, body string, want int, out any) {
+	call := func(method, path, token, body string, want int) []byte {
 		t.Helper()
 		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -28,55 +58,52 @@ func TestCardLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
 		if res.StatusCode != want {
-			b, _ := io.ReadAll(res.Body)
 			t.Fatalf("%s %s: got %d, want %d: %s", method, path, res.StatusCode, want, b)
 		}
-		if out != nil {
-			if err := json.NewDecoder(res.Body).Decode(out); err != nil {
-				t.Fatal(err)
-			}
+		return b
+	}
+	card := func(b []byte) (c Card) {
+		t.Helper()
+		if err := json.Unmarshal(b, &c); err != nil {
+			t.Fatal(err)
 		}
+		return c
 	}
 
-	call("GET", "/api/cards", "wrong", "", 401, nil)
-	call("POST", "/api/cards", "secret", `{"title":"CEO"}`, 400, nil)
+	call("GET", "/api/cards", "wrong", "", 401)
+	call("POST", "/api/cards", "secret", `{"title":"CEO"}`, 400)
+	// The app parses the list as a JSON array, so an empty list must be [] rather than null.
+	if got := strings.TrimSpace(string(call("GET", "/api/cards", "secret", "", 200))); got != "[]" {
+		t.Fatalf("empty list: %s", got)
+	}
 
-	var c Card
-	call("POST", "/api/cards", "secret", `{"id":"evil","hasImage":true,"name":"  Ada Lovelace ","company":"Analytical Engines"}`, 201, &c)
+	c := card(call("POST", "/api/cards", "secret", `{"id":"evil","hasImage":true,"name":"  Ada Lovelace ","company":"Analytical Engines"}`, 201))
 	if c.ID == "" || c.ID == "evil" || c.HasImage || c.Name != "Ada Lovelace" {
 		t.Fatalf("create: %+v", c)
 	}
 
 	img := "/api/cards/" + c.ID + "/image"
-	call("GET", img, "secret", "", 404, nil)
-	call("PUT", img, "secret", "not a jpeg", 415, nil)
-	var withImg Card
-	call("PUT", img, "secret", "\xFF\xD8\xFF\xE0 pretend jpeg", 200, &withImg)
-	if !withImg.HasImage {
+	call("GET", img, "secret", "", 404)
+	call("PUT", img, "secret", "not a jpeg", 415)
+	const photo = "\xFF\xD8\xFF\xE0 pretend jpeg"
+	if !card(call("PUT", img, "secret", photo, 200)).HasImage {
 		t.Fatal("image flag not set")
 	}
-	call("GET", img, "secret", "", 200, nil)
-
-	var u Card
-	call("PUT", "/api/cards/"+c.ID, "secret", `{"name":"Ada King","phone":"+44 20 7946 0000"}`, 200, &u)
-	if u.Name != "Ada King" || u.Company != "" || !u.HasImage || !u.CreatedAt.Equal(c.CreatedAt) {
-		t.Fatalf("update: %+v", u)
+	if got := call("GET", img, "secret", "", 200); string(got) != photo {
+		t.Fatalf("photo came back as %q", got)
 	}
 
-	reopened, err := openStore(dir)
-	if err != nil || reopened.cards[c.ID].Phone != "+44 20 7946 0000" {
-		t.Fatalf("reload: %v %+v", err, reopened.cards)
+	u2 := card(call("PUT", "/api/cards/"+c.ID, "secret", `{"name":"Ada King","phone":"+44 20 7946 0000"}`, 200))
+	if u2.Name != "Ada King" || u2.Company != "" || !u2.HasImage || !u2.CreatedAt.Equal(c.CreatedAt) {
+		t.Fatalf("update: %+v", u2)
 	}
+	call("PUT", "/api/cards/nope", "secret", `{"name":"x"}`, 404)
 
-	call("DELETE", "/api/cards/"+c.ID, "secret", "", 204, nil)
-	call("DELETE", "/api/cards/"+c.ID, "secret", "", 404, nil)
-	if _, err := os.Stat(s.imagePath(c.ID)); !os.IsNotExist(err) {
-		t.Fatalf("photo left behind: %v", err)
-	}
-	var list []Card
-	call("GET", "/api/cards", "secret", "", 200, &list)
-	if len(list) != 0 {
-		t.Fatalf("list after delete: %+v", list)
+	call("DELETE", "/api/cards/"+c.ID, "secret", "", 204)
+	call("DELETE", "/api/cards/"+c.ID, "secret", "", 404)
+	if got := strings.TrimSpace(string(call("GET", "/api/cards", "secret", "", 200))); got != "[]" {
+		t.Fatalf("list after delete: %s", got)
 	}
 }

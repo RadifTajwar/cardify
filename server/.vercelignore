@@ -1,0 +1,3 @@
+# Not for Vercel: card data from the old file-based server, and secrets pulled by `vercel env pull`.
+data/
+.env*
