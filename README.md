@@ -10,15 +10,13 @@ contacts from any card.
 
 ## Deploy the server
 
-The server runs on Vercel with a Neon Postgres database connected to the project (that sets `DATABASE_URL`).
+The server runs on Vercel (project Root Directory: `server`) with a Neon Postgres database connected to the project,
+which sets `DATABASE_URL`. **Every push to `main` deploys it.**
 
-```sh
-cd server
-openssl rand -hex 24 | vercel env add CARDIFY_TOKEN production   # once; the app must send the same token
-vercel deploy --prod
-```
+The app's token is a Vercel secret, set once: `openssl rand -hex 24 | vercel env add CARDIFY_TOKEN production --sensitive`
+(the app must send the same token).
 
-Run it locally against the same database: `vercel env pull .env.local && set -a && . ./.env.local && set +a && go run .`
+Run it locally against the same database: `cd server && vercel env pull .env.local && set -a && . ./.env.local && set +a && go run .`
 
 ## Run the app
 
