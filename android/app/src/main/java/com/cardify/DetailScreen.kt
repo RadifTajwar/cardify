@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Place
 import androidx.compose.material.icons.filled.Share
@@ -45,6 +46,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
@@ -67,8 +69,10 @@ fun DetailScreen(card: Card, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: 
                 title = {},
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
                 actions = {
-                    IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Edit") }
-                    IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete") }
+                    if (card.mine) { // someone else's public card is read-only
+                        IconButton(onClick = onEdit) { Icon(Icons.Default.Edit, "Edit") }
+                        IconButton(onClick = { confirmDelete = true }) { Icon(Icons.Default.Delete, "Delete") }
+                    }
                 },
             )
         },
@@ -84,6 +88,20 @@ fun DetailScreen(card: Card, onBack: () -> Unit, onEdit: () -> Unit, onDeleted: 
                 Text(card.displayName, style = MaterialTheme.typography.headlineSmall)
                 if (card.subtitle.isNotEmpty()) {
                     Text(card.subtitle, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+                    Icon(if (card.isPublic) WebIcon else Icons.Default.Lock, null, Modifier.size(16.dp), tint = muted)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        when {
+                            !card.mine -> "Public card shared by ${card.ownerName}"
+                            card.isPublic -> "Public: everyone on Cardify can find it"
+                            else -> "Private: only you can see it"
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = muted,
+                    )
                 }
             }
 

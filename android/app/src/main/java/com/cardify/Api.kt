@@ -1,5 +1,10 @@
 package com.cardify
 
+import android.content.Context
+import android.content.SharedPreferences
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -7,6 +12,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 data class Card(
     val id: String = "",
@@ -18,10 +24,13 @@ data class Card(
     val website: String = "",
     val address: String = "",
     val notes: String = "",
-    val hasImage: Boolean = false,
-    val updatedAt: String = "",
+    val isPublic: Boolean = false, // public cards show up in every user's search; private ones only for you
+    val photoUrl: String = "", // signed Cloudinary link, empty when the card has no photo
+    val mine: Boolean = true, // false for someone else's public card, which is read-only
+    val ownerName: String = "",
 ) {
     val displayName get() = name.ifBlank { company }
+    val hasImage get() = photoUrl.isNotEmpty()
     val phones get() = phone.split('\n', ',', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
     fun matches(query: String) =
@@ -40,19 +49,61 @@ data class Card(
     )
 }
 
+fun List<Card>.byName() = sortedBy { it.displayName.lowercase() }
+
 /** Runs blocking [block] on the IO pool. Failures come back as a Result; cancellation still propagates. */
 suspend fun <T> io(block: () -> T): Result<T> = withContext(Dispatchers.IO) { runCatching(block) }
 
 /** The Go server's REST API. Every call blocks, so wrap it in [io]. */
 object Api {
     private val base = BuildConfig.API_URL.trimEnd('/')
-    val auth = "Bearer ${BuildConfig.API_TOKEN}"
+    private lateinit var prefs: SharedPreferences
 
-    // The version param changes whenever the photo does, so image caches never show a stale scan.
-    fun imageUrl(c: Card) = "$base/api/cards/${c.id}/image?v=${c.updatedAt.filter(Char::isDigit)}"
+    /** The login token, or null when logged out; the app shows the login screen whenever it's null. */
+    var token by mutableStateOf<String?>(null)
+        private set
+    val userName get() = prefs.getString("name", "").orEmpty()
+    val userEmail get() = prefs.getString("email", "").orEmpty()
 
-    fun list(): List<Card> {
-        val a = JSONArray(call("GET", "/api/cards"))
+    /** Call once at startup. The login is kept in app-private storage, so you stay logged in. */
+    fun init(context: Context) {
+        prefs = context.getSharedPreferences("session", Context.MODE_PRIVATE)
+        token = prefs.getString("token", null)
+    }
+
+    fun signup(name: String, email: String, password: String) =
+        startSession("/api/auth/signup", JSONObject().put("name", name).put("email", email).put("password", password))
+
+    fun login(email: String, password: String) =
+        startSession("/api/auth/login", JSONObject().put("email", email).put("password", password))
+
+    private fun startSession(path: String, body: JSONObject) {
+        val res = JSONObject(call("POST", path, body.toString().toByteArray()))
+        val user = res.getJSONObject("user")
+        val t = res.getString("token")
+        prefs.edit().putString("token", t).putString("name", user.optString("name")).putString("email", user.optString("email")).apply()
+        token = t
+    }
+
+    /** Forgets the login on this phone, and on the server too when it's reachable. */
+    fun logout() {
+        runCatching { call("POST", "/api/auth/logout") }
+        forget()
+    }
+
+    private fun forget() {
+        prefs.edit().clear().apply()
+        token = null
+    }
+
+    /** Your own cards, private and public. */
+    fun list() = cards("/api/cards")
+
+    /** Everyone's public cards matching [query], newest first; the newest of all when it's blank. */
+    fun searchPublic(query: String) = cards("/api/cards/public?q=" + URLEncoder.encode(query, "UTF-8"))
+
+    private fun cards(path: String): List<Card> {
+        val a = JSONArray(call("GET", path))
         return List(a.length()) { a.getJSONObject(it).toCard() }
     }
 
@@ -60,6 +111,7 @@ object Api {
         val body = JSONObject()
             .put("name", c.name).put("title", c.title).put("company", c.company).put("phone", c.phone)
             .put("email", c.email).put("website", c.website).put("address", c.address).put("notes", c.notes)
+            .put("public", c.isPublic)
             .toString().toByteArray()
         val res = if (c.id.isEmpty()) call("POST", "/api/cards", body) else call("PUT", "/api/cards/${c.id}", body)
         return JSONObject(res).toCard()
@@ -73,12 +125,13 @@ object Api {
     }
 
     private fun call(method: String, path: String, body: ByteArray? = null, type: String = "application/json"): String {
+        val sent = token
         val conn = URL(base + path).openConnection() as HttpURLConnection
         try {
             conn.requestMethod = method
             conn.connectTimeout = 10_000
             conn.readTimeout = 30_000
-            conn.setRequestProperty("Authorization", auth)
+            if (sent != null) conn.setRequestProperty("Authorization", "Bearer $sent")
             if (body != null) {
                 conn.doOutput = true
                 conn.setRequestProperty("Content-Type", type)
@@ -86,6 +139,8 @@ object Api {
             }
             if (conn.responseCode !in 200..299) {
                 val msg = conn.errorStream?.bufferedReader()?.use { it.readText().trim() }
+                // The server no longer knows this login (it expired or was logged out), so back to the login screen.
+                if (conn.responseCode == 401 && sent != null && sent == token) forget()
                 throw IOException(if (msg.isNullOrEmpty()) "Server error ${conn.responseCode}" else msg)
             }
             return conn.inputStream.bufferedReader().use { it.readText() }
@@ -104,7 +159,9 @@ object Api {
         website = optString("website"),
         address = optString("address"),
         notes = optString("notes"),
-        hasImage = optBoolean("hasImage"),
-        updatedAt = optString("updatedAt"),
+        isPublic = optBoolean("public"),
+        photoUrl = optString("photoUrl"),
+        mine = optBoolean("mine"),
+        ownerName = optString("ownerName"),
     )
 }

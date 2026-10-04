@@ -21,8 +21,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
-import coil3.network.NetworkHeaders
-import coil3.network.httpHeaders
 import coil3.request.ImageRequest
 import coil3.request.crossfade
 
@@ -34,12 +32,9 @@ val Card.subtitle get() = listOf(title, if (name.isBlank()) "" else company).fil
 @Composable
 fun CardFace(card: Card, modifier: Modifier = Modifier, large: Boolean = false) {
     if (card.hasImage) {
+        // Straight from Cloudinary: the signed link is the permission, so the login token isn't sent along.
         AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(Api.imageUrl(card))
-                .httpHeaders(NetworkHeaders.Builder().set("Authorization", Api.auth).build())
-                .crossfade(true)
-                .build(),
+            model = ImageRequest.Builder(LocalContext.current).data(card.photoUrl).crossfade(true).build(),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),

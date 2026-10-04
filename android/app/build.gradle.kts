@@ -14,7 +14,6 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "API_URL", "\"${providers.gradleProperty("cardify.apiUrl").get()}\"")
-        buildConfigField("String", "API_TOKEN", "\"${providers.gradleProperty("cardify.token").get()}\"")
     }
 
     buildTypes {
