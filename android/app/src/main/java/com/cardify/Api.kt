@@ -77,6 +77,18 @@ object Api {
     fun login(email: String, password: String) =
         startSession("/api/auth/login", JSONObject().put("email", email).put("password", password))
 
+    /** Signs in, or signs up, with the ID token from Sign in with Google. */
+    fun google(idToken: String) = startSession("/api/auth/google", JSONObject().put("idToken", idToken))
+
+    /** Emails a 6-digit code for choosing a new password (if the email has an account; the answer is the same either way). */
+    fun forgotPassword(email: String) {
+        call("POST", "/api/auth/forgot", JSONObject().put("email", email).toString().toByteArray())
+    }
+
+    /** Sets a new password with the emailed code, which also logs you in. */
+    fun resetPassword(email: String, code: String, password: String) =
+        startSession("/api/auth/reset", JSONObject().put("email", email).put("code", code).put("password", password))
+
     private fun startSession(path: String, body: JSONObject) {
         val res = JSONObject(call("POST", path, body.toString().toByteArray()))
         val user = res.getJSONObject("user")

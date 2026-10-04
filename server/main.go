@@ -5,24 +5,20 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/mail"
 	"os"
 	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // CardFields are the parts of a card its owner edits; the rest of a Card is server-owned.
@@ -54,27 +50,18 @@ type User struct {
 	ID           string    `bson:"_id" json:"id"`
 	Name         string    `bson:"name" json:"name"`
 	Email        string    `bson:"email" json:"email"`
-	PasswordHash []byte    `bson:"passwordHash" json:"-"`
+	PasswordHash []byte    `bson:"passwordHash,omitempty" json:"-"` // none for accounts made with Google, until a password reset
+	GoogleID     string    `bson:"googleId,omitempty" json:"-"`
 	CreatedAt    time.Time `bson:"createdAt" json:"createdAt"`
 }
 
-// A session is one login. Its id is the hash of the token the app holds, so a database leak doesn't leak logins.
-type session struct {
-	ID        string    `bson:"_id"`
-	UserID    string    `bson:"userId"`
-	ExpiresAt time.Time `bson:"expiresAt"`
-}
-
-const (
-	sessionTTL  = 180 * 24 * time.Hour
-	maxFailures = 10 // wrong passwords for one email before its logins pause
-	lockout     = 15 * time.Minute
-)
-
 type store struct {
-	db                               *mongo.Database
-	users, sessions, failures, cards *mongo.Collection
-	photos                           *cloudinary // nil when CLOUDINARY_URL isn't set
+	db                                       *mongo.Database
+	users, sessions, failures, resets, cards *mongo.Collection
+	photos                                   *cloudinary                                               // nil when CLOUDINARY_URL isn't set
+	googleClientID                           string                                                    // empty when Google sign-in isn't set up
+	tokenInfoURL                             string                                                    // Google's ID token checker; tests swap in a fake
+	sendMail                                 func(ctx context.Context, to, subject, body string) error // nil when email isn't set up
 }
 
 func openStore(ctx context.Context, uri, dbName string) (*store, error) {
@@ -84,17 +71,25 @@ func openStore(ctx context.Context, uri, dbName string) (*store, error) {
 	}
 	db := client.Database(dbName)
 	s := &store{
-		db:       db,
-		users:    db.Collection("users"),
-		sessions: db.Collection("sessions"),
-		failures: db.Collection("loginFailures"),
-		cards:    db.Collection("cards"),
+		db:           db,
+		users:        db.Collection("users"),
+		sessions:     db.Collection("sessions"),
+		failures:     db.Collection("loginFailures"),
+		resets:       db.Collection("passwordResets"),
+		cards:        db.Collection("cards"),
+		tokenInfoURL: "https://oauth2.googleapis.com/tokeninfo",
 	}
-	expire := options.Index().SetExpireAfterSeconds(0) // MongoDB deletes these documents once expiresAt passes
+	expire := func(field string) mongo.IndexModel { // MongoDB deletes these documents once field's time passes
+		return mongo.IndexModel{Keys: bson.M{field: 1}, Options: options.Index().SetExpireAfterSeconds(0)}
+	}
 	indexes := map[*mongo.Collection][]mongo.IndexModel{
-		s.users:    {{Keys: bson.M{"email": 1}, Options: options.Index().SetUnique(true)}},
-		s.sessions: {{Keys: bson.M{"expiresAt": 1}, Options: expire}},
-		s.failures: {{Keys: bson.M{"expiresAt": 1}, Options: expire}},
+		s.users: {
+			{Keys: bson.M{"email": 1}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.M{"googleId": 1}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		},
+		s.sessions: {expire("expiresAt")},
+		s.failures: {expire("expiresAt")},
+		s.resets:   {expire("purgeAt")},
 		s.cards: {
 			{Keys: bson.M{"ownerId": 1}},
 			{Keys: bson.D{{Key: "public", Value: 1}, {Key: "updatedAt", Value: -1}}},
@@ -113,6 +108,9 @@ func (s *store) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/auth/signup", s.signup)
 	mux.HandleFunc("POST /api/auth/login", s.login)
+	mux.HandleFunc("POST /api/auth/google", s.google)
+	mux.HandleFunc("POST /api/auth/forgot", s.forgot)
+	mux.HandleFunc("POST /api/auth/reset", s.reset)
 	mux.HandleFunc("POST /api/auth/logout", s.authed(s.logout))
 	mux.HandleFunc("GET /api/cards", s.authed(s.list))
 	mux.HandleFunc("GET /api/cards/public", s.authed(s.searchPublic))
@@ -121,127 +119,6 @@ func (s *store) handler() http.Handler {
 	mux.HandleFunc("DELETE /api/cards/{id}", s.authed(s.delete))
 	mux.HandleFunc("PUT /api/cards/{id}/image", s.authed(s.putImage))
 	return mux
-}
-
-// authed runs h for a logged-in caller, passing their user id; anyone else gets a 401.
-func (s *store) authed(h func(w http.ResponseWriter, r *http.Request, uid string)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var sess session
-		err := s.sessions.FindOne(r.Context(), bson.M{"_id": hashToken(bearer(r)), "expiresAt": bson.M{"$gt": time.Now()}}).Decode(&sess)
-		switch {
-		case errors.Is(err, mongo.ErrNoDocuments):
-			http.Error(w, "please log in again", http.StatusUnauthorized)
-		case err != nil:
-			serverError(w, err)
-		default:
-			h(w, r, sess.UserID)
-		}
-	}
-}
-
-type credentials struct {
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-func (s *store) signup(w http.ResponseWriter, r *http.Request) {
-	in, ok := decodeCredentials(w, r)
-	if !ok {
-		return
-	}
-	if addr, err := mail.ParseAddress(in.Email); err != nil || addr.Address != in.Email {
-		http.Error(w, "enter a valid email address", http.StatusBadRequest)
-		return
-	}
-	if in.Name == "" {
-		http.Error(w, "enter your name", http.StatusBadRequest)
-		return
-	}
-	if utf8.RuneCountInString(in.Password) < 8 {
-		http.Error(w, "use a password of at least 8 characters", http.StatusBadRequest)
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
-	if errors.Is(err, bcrypt.ErrPasswordTooLong) {
-		http.Error(w, "that password is too long (72 characters at most)", http.StatusBadRequest)
-		return
-	}
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	u := User{ID: rand.Text(), Name: in.Name, Email: in.Email, PasswordHash: hash, CreatedAt: now()}
-	_, err = s.users.InsertOne(r.Context(), u)
-	if mongo.IsDuplicateKeyError(err) {
-		http.Error(w, "an account with this email already exists; log in instead", http.StatusConflict)
-		return
-	}
-	if err != nil {
-		serverError(w, err)
-		return
-	}
-	s.startSession(w, r, u, http.StatusCreated)
-}
-
-func (s *store) login(w http.ResponseWriter, r *http.Request) {
-	in, ok := decodeCredentials(w, r)
-	if !ok {
-		return
-	}
-	ctx := r.Context()
-	var failed struct {
-		Count int `bson:"count"`
-	}
-	err := s.failures.FindOne(ctx, bson.M{"_id": in.Email, "expiresAt": bson.M{"$gt": time.Now()}}).Decode(&failed)
-	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-		serverError(w, err)
-		return
-	}
-	if failed.Count >= maxFailures {
-		http.Error(w, "too many wrong passwords; try again in 15 minutes", http.StatusTooManyRequests)
-		return
-	}
-
-	var u User
-	err = s.users.FindOne(ctx, bson.M{"email": in.Email}).Decode(&u)
-	if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
-		serverError(w, err)
-		return
-	}
-	if err != nil || bcrypt.CompareHashAndPassword(u.PasswordHash, []byte(in.Password)) != nil {
-		// Count the miss; the first one starts the 15-minute window.
-		_, err := s.failures.UpdateOne(ctx, bson.M{"_id": in.Email},
-			bson.M{"$inc": bson.M{"count": 1}, "$setOnInsert": bson.M{"expiresAt": time.Now().Add(lockout)}},
-			options.UpdateOne().SetUpsert(true))
-		if err != nil {
-			log.Print(err)
-		}
-		http.Error(w, "wrong email or password", http.StatusUnauthorized)
-		return
-	}
-	if _, err := s.failures.DeleteOne(ctx, bson.M{"_id": in.Email}); err != nil {
-		log.Print(err)
-	}
-	s.startSession(w, r, u, http.StatusOK)
-}
-
-// startSession logs u in: it stores a new session and answers with the token the app keeps.
-func (s *store) startSession(w http.ResponseWriter, r *http.Request, u User, status int) {
-	token := rand.Text()
-	if _, err := s.sessions.InsertOne(r.Context(), session{hashToken(token), u.ID, time.Now().Add(sessionTTL)}); err != nil {
-		serverError(w, err)
-		return
-	}
-	writeJSON(w, status, map[string]any{"token": token, "user": u})
-}
-
-func (s *store) logout(w http.ResponseWriter, r *http.Request, _ string) {
-	if _, err := s.sessions.DeleteOne(r.Context(), bson.M{"_id": hashToken(bearer(r))}); err != nil {
-		serverError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *store) list(w http.ResponseWriter, r *http.Request, uid string) {
@@ -407,13 +284,6 @@ func decodeCard(w http.ResponseWriter, r *http.Request) (CardFields, bool) {
 	return f, true
 }
 
-func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
-	var c credentials
-	ok := decodeJSON(w, r, &c)
-	c.Name, c.Email = strings.TrimSpace(c.Name), strings.ToLower(strings.TrimSpace(c.Email))
-	return c, ok
-}
-
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v); err != nil {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
@@ -422,14 +292,18 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-func bearer(r *http.Request) string {
-	token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return token
-}
-
-func hashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+// doJSON sends req to another service and decodes its 200 answer's JSON into out.
+func doJSON(req *http.Request, out any) error {
+	res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1<<10))
+		return fmt.Errorf("%s %s%s: %s: %s", req.Method, req.URL.Host, req.URL.Path, res.Status, msg) // no query: it may hold a token
+	}
+	return json.NewDecoder(res.Body).Decode(out)
 }
 
 // now is the current time as MongoDB stores it (UTC, milliseconds), so a card reads back exactly as it was written.
@@ -461,6 +335,14 @@ func main() {
 		}
 	} else {
 		log.Print("CLOUDINARY_URL isn't set, so photo uploads are off")
+	}
+	if s.googleClientID = os.Getenv("GOOGLE_CLIENT_ID"); s.googleClientID == "" {
+		log.Print("GOOGLE_CLIENT_ID isn't set, so Google sign-in is off")
+	}
+	if g := newGmail(); g != nil {
+		s.sendMail = g.send
+	} else {
+		log.Print("GMAIL_* isn't set, so password reset emails are off")
 	}
 	srv := &http.Server{
 		Addr:              ":" + cmp.Or(os.Getenv("PORT"), "8080"), // Vercel sets PORT

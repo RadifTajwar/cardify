@@ -14,6 +14,8 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "API_URL", "\"${providers.gradleProperty("cardify.apiUrl").get()}\"")
+        // Sign in with Google's Web client ID; empty hides the Google button.
+        buildConfigField("String", "GOOGLE_CLIENT_ID", "\"${providers.gradleProperty("cardify.googleClientId").getOrElse("")}\"")
     }
 
     buildTypes {
@@ -23,7 +25,7 @@ android {
             manifestPlaceholders["cleartext"] = "false"
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -42,6 +44,9 @@ dependencies {
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
     implementation("com.google.android.gms:play-services-mlkit-document-scanner:16.0.0")
     implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.2.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

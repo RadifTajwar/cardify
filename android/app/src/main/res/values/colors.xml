@@ -1,0 +1,4 @@
+<resources>
+    <!-- The app background (Theme.kt), so launch shows no white flash. -->
+    <color name="background">#F7F7FC</color>
+</resources>

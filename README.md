@@ -16,6 +16,12 @@ The server runs on Vercel (project Root Directory: `server`). **Every push to `m
 - `MONGODB_URI`: connect MongoDB Atlas to the Vercel project (Vercel Marketplace → MongoDB Atlas), which sets it.
 - `CLOUDINARY_URL`: `cloudinary://<api_key>:<api_secret>@<cloud_name>` from the Cloudinary dashboard, added as a
   Sensitive variable for Production and Preview. Without it the server still runs, but photo uploads are off.
+- `GOOGLE_CLIENT_ID`: the Web application client ID from Google Cloud (Google Auth Platform → Clients), for
+  "Continue with Google". The app's `cardify.googleClientId` (in `android/gradle.properties`) must be the same ID, and
+  the project needs an Android client for `com.cardify` with the signing key's SHA-1.
+- `GMAIL_SENDER` and `GMAIL_APP_PASSWORD`: the Gmail address that emails password reset codes, and an app password for
+  it (Google Account → Security → 2-Step Verification → App passwords). Without them, "Forgot password" says it isn't
+  set up.
 
 Run it locally with MongoDB in Docker:
 

@@ -11,38 +11,51 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +66,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -137,17 +156,26 @@ fun EditScreen(initial: Card, onBack: () -> Unit, onSaved: (Card) -> Unit) {
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(if (initial.id.isEmpty()) "New card" else "Edit card") },
+                title = { Text(if (initial.id.isEmpty()) "New card" else "Edit card", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = { IconButton(onClick = leave) { Icon(Icons.Default.Close, "Close") } },
                 actions = {
-                    if (busy) {
-                        CircularProgressIndicator(Modifier.padding(end = 16.dp).size(24.dp), strokeWidth = 2.dp)
-                    } else {
-                        TextButton(onClick = save, enabled = card.name.isNotBlank() || card.company.isNotBlank()) { Text("Save") }
+                    Button(
+                        onClick = save,
+                        enabled = !busy && (card.name.isNotBlank() || card.company.isNotBlank()),
+                        modifier = Modifier.padding(end = 12.dp),
+                        shape = CircleShape,
+                    ) {
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+                        } else {
+                            Text("Save")
+                        }
                     }
                 },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
             )
         },
     ) { padding ->
@@ -157,61 +185,34 @@ fun EditScreen(initial: Card, onBack: () -> Unit, onSaved: (Card) -> Unit) {
                 .consumeWindowInsets(padding)
                 .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(CARD_RATIO)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .clickable(onClick = scan),
-                contentAlignment = Alignment.Center,
-            ) {
-                when {
-                    photo != null -> AsyncImage(photo, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    card.hasImage -> CardFace(card, Modifier.fillMaxSize())
-                    else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.Add, null)
-                        Text("Tap to scan the card")
-                    }
+            PhotoBox(photo, card, scan)
+            Section("Who can see it") {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ChoiceTile(!card.isPublic, Icons.Default.Lock, "Private", "Only you", Modifier.weight(1f)) { card = card.copy(isPublic = false) }
+                    ChoiceTile(card.isPublic, PublicIcon, "Public", "Anyone on Cardify", Modifier.weight(1f)) { card = card.copy(isPublic = true) }
                 }
             }
-            if (photo != null || card.hasImage) {
-                Text(
-                    "Tap the photo to rescan",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            Section("Person") {
+                Field("Name", card.name, Icons.Default.Person, KeyboardCapitalization.Words) { card = card.copy(name = it) }
+                Field("Job title", card.title, WorkIcon, KeyboardCapitalization.Words) { card = card.copy(title = it) }
+                Field("Company", card.company, BusinessIcon, KeyboardCapitalization.Words) { card = card.copy(company = it) }
             }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .toggleable(value = card.isPublic, role = Role.Switch) { card = card.copy(isPublic = it) }
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Public", style = MaterialTheme.typography.bodyLarge)
-                    Text(
-                        if (card.isPublic) "Everyone on Cardify can find this card" else "Only you can see this card",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+            Section("Contact") {
+                Field("Phone", card.phone, Icons.Default.Call, type = KeyboardType.Phone, multiLine = true, hint = "One number per line, or comma-separated") {
+                    card = card.copy(phone = it)
                 }
-                Switch(checked = card.isPublic, onCheckedChange = null)
+                Field("Email", card.email, Icons.Default.Email, type = KeyboardType.Email) { card = card.copy(email = it) }
+                Field("Website", card.website, WebIcon, type = KeyboardType.Uri) { card = card.copy(website = it) }
+                Field("Address", card.address, Icons.Default.Place, KeyboardCapitalization.Words, multiLine = true) { card = card.copy(address = it) }
             }
-            Field("Name", card.name, KeyboardCapitalization.Words) { card = card.copy(name = it) }
-            Field("Job title", card.title, KeyboardCapitalization.Words) { card = card.copy(title = it) }
-            Field("Company", card.company, KeyboardCapitalization.Words) { card = card.copy(company = it) }
-            Field("Phone", card.phone, type = KeyboardType.Phone, multiLine = true, hint = "One number per line, or comma-separated") {
-                card = card.copy(phone = it)
+            Section("Notes") {
+                Field("Where you met, what you talked about…", card.notes, NotesIcon, KeyboardCapitalization.Sentences, multiLine = true) {
+                    card = card.copy(notes = it)
+                }
             }
-            Field("Email", card.email, type = KeyboardType.Email) { card = card.copy(email = it) }
-            Field("Website", card.website, type = KeyboardType.Uri) { card = card.copy(website = it) }
-            Field("Address", card.address, KeyboardCapitalization.Words, multiLine = true) { card = card.copy(address = it) }
-            Field("Notes", card.notes, KeyboardCapitalization.Sentences, multiLine = true) { card = card.copy(notes = it) }
         }
     }
 
@@ -219,9 +220,88 @@ fun EditScreen(initial: Card, onBack: () -> Unit, onSaved: (Card) -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmDiscard = false },
             title = { Text("Discard changes?") },
+            text = { Text("What you've typed or scanned on this card won't be saved.") },
             confirmButton = { TextButton(onClick = onBack) { Text("Discard") } },
             dismissButton = { TextButton(onClick = { confirmDiscard = false }) { Text("Keep editing") } },
         )
+    }
+}
+
+/** The scan: a dashed drop zone before there is one, then the photo with a hint to rescan. */
+@Composable
+private fun PhotoBox(photo: Uri?, card: Card, scan: () -> Unit) {
+    val shape = RoundedCornerShape(24.dp)
+    val outline = MaterialTheme.colorScheme.outline
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .aspectRatio(CARD_RATIO)
+            .clip(shape)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .then(
+                if (photo == null && !card.hasImage) {
+                    Modifier.drawBehind {
+                        drawRoundRect(
+                            color = outline,
+                            style = Stroke(width = 2.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(10.dp.toPx(), 8.dp.toPx()))),
+                            cornerRadius = CornerRadius(24.dp.toPx()),
+                        )
+                    }
+                } else {
+                    Modifier
+                },
+            )
+            .clickable(onClick = scan),
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            photo != null -> AsyncImage(photo, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            card.hasImage -> CardFace(card, Modifier.fillMaxSize())
+            else -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(Modifier.size(64.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                    Icon(CameraIcon, null, Modifier.size(30.dp), tint = MaterialTheme.colorScheme.primary)
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("Scan the card", style = MaterialTheme.typography.titleMedium)
+                Text("Cardify reads the details for you", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (photo != null || card.hasImage) {
+            Surface(Modifier.align(Alignment.BottomEnd).padding(12.dp), shape = CircleShape, color = Color.Black.copy(alpha = 0.55f)) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(ScanIcon, null, Modifier.size(16.dp), tint = Color.White)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Rescan", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(title, Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        content()
+    }
+}
+
+@Composable
+private fun ChoiceTile(selected: Boolean, icon: ImageVector, title: String, text: String, modifier: Modifier, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    val colors = MaterialTheme.colorScheme
+    Column(
+        modifier
+            .clip(shape)
+            .background(if (selected) colors.primaryContainer else colors.surfaceContainerLowest)
+            .border(if (selected) 2.dp else 1.dp, if (selected) colors.primary else colors.outlineVariant, shape)
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(16.dp),
+    ) {
+        Icon(icon, null, tint = if (selected) colors.primary else colors.onSurfaceVariant)
+        Spacer(Modifier.height(10.dp))
+        Text(title, style = MaterialTheme.typography.titleSmall, color = if (selected) colors.onPrimaryContainer else colors.onSurface)
+        Text(text, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
     }
 }
 
@@ -229,6 +309,7 @@ fun EditScreen(initial: Card, onBack: () -> Unit, onSaved: (Card) -> Unit) {
 private fun Field(
     label: String,
     value: String,
+    icon: ImageVector,
     capitalization: KeyboardCapitalization = KeyboardCapitalization.None,
     type: KeyboardType = KeyboardType.Text,
     multiLine: Boolean = false,
@@ -239,9 +320,16 @@ private fun Field(
     onValueChange = onChange,
     modifier = Modifier.fillMaxWidth(),
     label = { Text(label) },
+    leadingIcon = { Icon(icon, null) },
     supportingText = hint?.let { { Text(it) } },
     singleLine = !multiLine,
+    shape = RoundedCornerShape(16.dp),
     keyboardOptions = KeyboardOptions(capitalization = capitalization, keyboardType = type),
+    colors = OutlinedTextFieldDefaults.colors(
+        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+    ),
 )
 
 /** Re-encodes the scan at 1600px on its longest side, so each photo is a few hundred KB. */

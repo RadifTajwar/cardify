@@ -4,21 +4,33 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import coil3.request.ImageRequest
@@ -27,6 +39,20 @@ import coil3.request.crossfade
 const val CARD_RATIO = 1.75f // a standard 3.5" × 2" visiting card
 
 val Card.subtitle get() = listOf(title, if (name.isBlank()) "" else company).filter { it.isNotBlank() }.joinToString(" · ")
+
+fun initials(name: String) = name.split(' ').filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() }
+
+// Gradients for cards without a photo, picked by name so a card keeps its colors.
+private val faceGradients = listOf(
+    0xFF6366F1 to 0xFF8B5CF6, // indigo → violet
+    0xFF0EA5E9 to 0xFF6366F1, // sky → indigo
+    0xFF10B981 to 0xFF0D9488, // emerald → teal
+    0xFFF59E0B to 0xFFEF4444, // amber → red
+    0xFFEC4899 to 0xFF8B5CF6, // pink → violet
+    0xFF14B8A6 to 0xFF3B82F6, // teal → blue
+    0xFFF97316 to 0xFFDB2777, // orange → pink
+    0xFF3B82F6 to 0xFF1E3A8A, // blue → navy
+)
 
 /** The card's photo, or a gradient face with the initials when it has none. */
 @Composable
@@ -37,22 +63,64 @@ fun CardFace(card: Card, modifier: Modifier = Modifier, large: Boolean = false) 
             model = ImageRequest.Builder(LocalContext.current).data(card.photoUrl).crossfade(true).build(),
             contentDescription = null,
             contentScale = ContentScale.Crop,
-            modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+            modifier = modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh),
         )
     } else {
-        val hue = (card.displayName.hashCode() and 0x7fffffff) % 360f
+        val (from, to) = faceGradients[(card.displayName.hashCode() and 0x7fffffff) % faceGradients.size]
         Box(
-            modifier.background(Brush.linearGradient(listOf(Color.hsv(hue, 0.5f, 0.85f), Color.hsv((hue + 40) % 360, 0.7f, 0.5f)))),
+            modifier
+                .background(Brush.linearGradient(listOf(Color(from), Color(to))))
+                .drawBehind {
+                    // Two soft circles, so a card without a photo still looks like a designed card.
+                    drawCircle(Color.White.copy(alpha = 0.16f), radius = size.height * 0.8f, center = Offset(size.width * 0.95f, 0f))
+                    drawCircle(Color.White.copy(alpha = 0.08f), radius = size.height * 0.55f, center = Offset(size.width * 0.05f, size.height))
+                },
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                card.displayName.split(' ').filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() },
+                initials(card.displayName),
                 color = Color.White,
-                fontWeight = FontWeight.Bold,
-                style = if (large) MaterialTheme.typography.displayMedium else MaterialTheme.typography.titleMedium,
+                style = if (large) MaterialTheme.typography.displayMedium else MaterialTheme.typography.headlineSmall,
             )
         }
     }
+}
+
+/** A round badge with someone's initials on the brand gradient. */
+@Composable
+fun Avatar(name: String, modifier: Modifier = Modifier) {
+    Box(modifier.size(40.dp).clip(CircleShape).background(BrandGradient), contentAlignment = Alignment.Center) {
+        Text(initials(name).ifEmpty { "?" }, color = Color.White, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+/** A friendly placeholder for an empty list. */
+@Composable
+fun EmptyState(icon: ImageVector, title: String, text: String, modifier: Modifier = Modifier) {
+    Column(modifier.padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(Modifier.size(88.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+            Icon(icon, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(6.dp))
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+    }
+}
+
+// The screen transition's shared-element scopes, so a tapped card can grow into the details screen.
+@OptIn(ExperimentalSharedTransitionApi::class)
+val LocalSharedTransition = compositionLocalOf<SharedTransitionScope?> { null }
+val LocalScreenTransition = compositionLocalOf<AnimatedVisibilityScope?> { null }
+
+/** Marks a card's face as the same element on every screen it appears on. */
+@OptIn(ExperimentalSharedTransitionApi::class)
+@Composable
+fun Modifier.sharedCard(id: String): Modifier {
+    val shared = LocalSharedTransition.current
+    val screen = LocalScreenTransition.current
+    if (shared == null || screen == null || id.isEmpty()) return this
+    return with(shared) { this@sharedCard.sharedElement(rememberSharedContentState("card-$id"), screen) }
 }
 
 fun Context.toast(message: String?) = Toast.makeText(this, message ?: "Something went wrong", Toast.LENGTH_LONG).show()
@@ -64,13 +132,3 @@ fun Context.startSafely(intent: Intent) {
         toast("No app on this phone can open that")
     }
 }
-
-/** Material's "language" globe; the core icon set has no web icon. */
-val WebIcon = ImageVector.Builder("Web", 24.dp, 24.dp, 24f, 24f)
-    .addPath(
-        addPathNodes(
-            "M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zm6.93 6h-2.95c-.32-1.25-.78-2.45-1.38-3.56 1.84.63 3.37 1.91 4.33 3.56zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14C4.1 13.36 4 12.69 4 12s.1-1.36.26-2h3.38c-.08.66-.14 1.32-.14 2 0 .68.06 1.34.14 2H4.26zm.82 2h2.95c.32 1.25.78 2.45 1.38 3.56-1.84-.63-3.37-1.9-4.33-3.56zm2.95-8H5.08c.96-1.66 2.49-2.93 4.33-3.56C8.81 5.55 8.35 6.75 8.03 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66c-.09-.66-.16-1.32-.16-2 0-.68.07-1.35.16-2h4.68c.09.65.16 1.32.16 2 0 .68-.07 1.34-.16 2zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95c-.96 1.65-2.49 2.93-4.33 3.56zM16.36 14c.08-.66.14-1.32.14-2 0-.68-.06-1.34-.14-2h3.38c.16.64.26 1.31.26 2s-.1 1.36-.26 2h-3.38z"
-        ),
-        fill = SolidColor(Color.Black),
-    )
-    .build()

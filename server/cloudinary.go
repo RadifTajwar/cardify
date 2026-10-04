@@ -6,10 +6,8 @@ import (
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -84,14 +82,5 @@ func (c *cloudinary) call(ctx context.Context, action string, params url.Values,
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(res.Body, 1<<10))
-		return fmt.Errorf("cloudinary %s: %s: %s", action, res.Status, msg)
-	}
-	return json.NewDecoder(res.Body).Decode(out)
+	return doJSON(req, out)
 }
